@@ -1,7 +1,8 @@
 import os
-import numpy as np
-import librosa
-import soundfile as sf
+import shutil
+import logging
+
+logger = logging.getLogger("AudioPrep")
 
 def preprocess_audio(
     input_path: str, 
@@ -32,6 +33,18 @@ def preprocess_audio(
         
     # Create directory for output if it doesn't exist
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    try:
+        import numpy as np
+        import librosa
+        import soundfile as sf
+    except ImportError:
+        logger.warning(
+            "DSP libraries (librosa/soundfile/numpy) not found. "
+            "Skipping preprocessing and copying raw file directly."
+        )
+        shutil.copy(input_path, output_path)
+        return os.path.abspath(output_path)
 
     # 1 & 2. Load audio and resample to target sample rate (sr=target_sr forces conversion)
     # mono=True converts stereo to mono automatically

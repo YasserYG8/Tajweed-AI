@@ -21,7 +21,7 @@ For complete details, see:
 
 The project is structured into three progressive engineering phases:
 
-### 🚀 [Phase 1: Word-Level MVP](mvp_phase1_architecture.md)
+### 🚀 [Phase 1: Word-Level MVP](phase1_architecture.md)
 *   **Goal**: Detect simple reading omissions, insertions, and substitutions.
 *   **Engine**: Resampling/noise preprocessing, WhisperX alignment, Arabic character normalizer, and Levenshtein Diff error mapping.
 *   *Details*: See [mvp_phase1_architecture.md](mvp_phase1_architecture.md)
