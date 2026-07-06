@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TajweedAligner")
 
 class TajweedAligner:
-    def __init__(self, use_ml: bool = False, model_name: str = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"):
+    def __init__(self, use_ml: bool = False, model_name: str = "rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final"):
         """
         Initialize the Aligner.
         
@@ -44,13 +44,14 @@ class TajweedAligner:
                 )
                 self.use_ml = False
 
-    def align(self, audio_path: str, ground_truth_text: str) -> Tuple[List[str], List[Dict[str, float]]]:
+    def align(self, audio_path: str, ground_truth_text: str, force_align: bool = False) -> Tuple[List[str], List[Dict[str, float]]]:
         """
         Aligns an audio file with ground truth words, yielding timestamps.
         
         Args:
             audio_path (str): Path to the normalized WAV audio.
             ground_truth_text (str): Expected canonical Quran text.
+            force_align (bool): If True, bypasses ASR spelling decoding and aligns directly to ground truth.
             
         Returns:
             Tuple[List[str], List[Dict[str, float]]]: Spoken words and their word boundaries.
@@ -59,50 +60,172 @@ class TajweedAligner:
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         if self.use_ml:
-            return self._align_ml(audio_path, ground_truth_text)
+            return self._align_ml(audio_path, ground_truth_text, force_align=force_align)
         else:
             return self._align_simulation(audio_path, ground_truth_text)
 
-    def _align_ml(self, audio_path: str, ground_truth_text: str) -> Tuple[List[str], List[Dict[str, float]]]:
+    def _align_ml(self, audio_path: str, ground_truth_text: str, force_align: bool = False) -> Tuple[List[str], List[Dict[str, float]]]:
         """
-        Real ML alignment using HuggingFace Wav2Vec2 CTC Segmentation / Alignment.
+        Real ML alignment using HuggingFace Wav2Vec2 CTC Segmentation / Viterbi Forced Alignment.
         """
         import librosa
         import torch
+        import numpy as np
         
-        # Load audio (forced to 16kHz)
+        try:
+            from src.text_utils.normalizer import normalize_arabic
+        except ImportError:
+            import sys
+            sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+            from src.text_utils.normalizer import normalize_arabic
+
+        # 1. Load audio (forced to 16kHz)
         speech, sr = librosa.load(audio_path, sr=16000)
+        duration = len(speech) / 16000.0
         
-        # Process input values
+        # 2. Perform ML Inference to get character logits
         input_values = self.processor(speech, sampling_rate=16000, return_tensors="pt").input_values
-        
-        # Perform inference
         with torch.no_grad():
             logits = self.model(input_values).logits
         
-        # Standard argmax to get predicted token IDs
-        predicted_ids = torch.argmax(logits, dim=-1)
-        transcription = self.processor.batch_decode(predicted_ids)[0]
+        # Convert logits to log-probabilities
+        logits_np = logits[0].cpu().numpy()
+        max_logits = np.max(logits_np, axis=-1, keepdims=True)
+        exp_logits = np.exp(logits_np - max_logits)
+        log_probs = (logits_np - max_logits) - np.log(np.sum(exp_logits, axis=-1, keepdims=True) + 1e-9)
         
-        # Break transcription into words
-        spoken_words = transcription.split()
+        frames = log_probs.shape[0]
+        frame_duration = duration / frames
+
+        # 3. Transcribe or use ground-truth directly
+        if force_align:
+            transcription = ground_truth_text
+        else:
+            predicted_ids = torch.argmax(logits, dim=-1)
+            transcription = self.processor.batch_decode(predicted_ids)[0]
         
-        # In a full forced-aligner (like MFA or CTC alignment), you backtrack the token sequence
-        # to find frame indices. For this initial wrapper, we map approximate linear intervals 
-        # from predicted logits duration for simplicity.
-        duration = len(speech) / 16000.0
-        num_words = len(spoken_words)
+        words_list = transcription.split()
+        if not words_list:
+            return [], []
+            
+        norm_text = normalize_arabic(transcription)
+        target_text = norm_text.replace(" ", "|")
         
+        vocab = self.processor.tokenizer.get_vocab()
+        blank_id = self.processor.tokenizer.pad_token_id
+        if blank_id is None:
+            blank_id = 0
+            
+        target_ids = []
+        char_to_word_map = []
+        curr_word_idx = 0
+        
+        for char in target_text:
+            if char == '|':
+                target_ids.append(vocab.get('|', 4))
+                char_to_word_map.append(-1)
+                curr_word_idx += 1
+            else:
+                target_ids.append(vocab.get(char, vocab.get('<unk>', 3)))
+                char_to_word_map.append(curr_word_idx)
+                
+        # Interleave blank tokens to support true CTC alignment path transitions
+        # T_ctc = [blank, char0, blank, char1, blank, ...]
+        ctc_ids = []
+        ctc_word_map = []
+        for idx in range(len(target_ids)):
+            ctc_ids.append(blank_id)
+            ctc_word_map.append(-1)
+            ctc_ids.append(target_ids[idx])
+            ctc_word_map.append(char_to_word_map[idx])
+        ctc_ids.append(blank_id)
+        ctc_word_map.append(-1)
+        
+        L_ctc = len(ctc_ids)
+        
+        # Fallback to linear segmentation if text is longer than audio frames
+        if L_ctc > frames or L_ctc == 0:
+            logger.warning("Target text CTC token length exceeds audio frames. Falling back to linear alignment.")
+            spoken_timestamps = []
+            if len(words_list) > 0:
+                step = duration / len(words_list)
+                for idx in range(len(words_list)):
+                    spoken_timestamps.append({
+                        "start": round(idx * step, 2),
+                        "end": round((idx + 1) * step, 2)
+                    })
+            return words_list, spoken_timestamps
+
+        # 4. Run Viterbi CTC Alignment Trellis (interleaved blanks version)
+        trellis = np.full((frames, L_ctc), -np.inf)
+        backpointers = np.zeros((frames, L_ctc), dtype=int)
+        
+        # Init first frame: can start at blank (idx 0) or first char (idx 1)
+        trellis[0, 0] = log_probs[0, blank_id]
+        if L_ctc > 1:
+            trellis[0, 1] = log_probs[0, ctc_ids[1]]
+            
+        for t in range(1, frames):
+            for s in range(L_ctc):
+                # Standard CTC state transitions:
+                stay = trellis[t-1, s]
+                prev = trellis[t-1, s-1] if s > 0 else -np.inf
+                skip = -np.inf
+                # Can skip blank if current token is not blank and is different from two steps back
+                if s > 1 and ctc_ids[s] != blank_id and ctc_ids[s] != ctc_ids[s-2]:
+                    skip = trellis[t-1, s-2]
+                    
+                candidates = [stay, prev, skip]
+                best_idx = int(np.argmax(candidates))
+                best_prob = candidates[best_idx]
+                
+                trellis[t, s] = log_probs[t, ctc_ids[s]] + best_prob
+                
+                if best_idx == 0:
+                    backpointers[t, s] = s
+                elif best_idx == 1:
+                    backpointers[t, s] = s - 1
+                else:
+                    backpointers[t, s] = s - 2
+
+        # 5. Backtrace optimal path
+        path = []
+        curr_s = L_ctc - 1
+        # Final frame can end at last blank (L_ctc-1) or last char (L_ctc-2)
+        if L_ctc > 1 and trellis[frames-1, L_ctc-2] > trellis[frames-1, L_ctc-1]:
+            curr_s = L_ctc - 2
+            
+        for t in range(frames - 1, -1, -1):
+            path.append(curr_s)
+            curr_s = backpointers[t, curr_s]
+            
+        path.reverse()
+        
+        # 6. Group frame timestamps into words using the character-to-word map
+        word_frames = {w_idx: [] for w_idx in range(len(words_list))}
+        
+        for t, s_idx in enumerate(path):
+            w_idx = ctc_word_map[s_idx]
+            if w_idx != -1:
+                word_frames[w_idx].append(t)
+                
         spoken_timestamps = []
-        if num_words > 0:
-            step = duration / num_words
-            for idx, word in enumerate(spoken_words):
+        for w_idx in range(len(words_list)):
+            frames_for_word = word_frames[w_idx]
+            if frames_for_word:
+                start_time = round(min(frames_for_word) * frame_duration, 2)
+                end_time = round((max(frames_for_word) + 1) * frame_duration, 2)
                 spoken_timestamps.append({
-                    "start": round(idx * step, 2),
-                    "end": round((idx + 1) * step, 2)
+                    "start": start_time,
+                    "end": end_time
+                })
+            else:
+                spoken_timestamps.append({
+                    "start": None,
+                    "end": None
                 })
                 
-        return spoken_words, spoken_timestamps
+        return words_list, spoken_timestamps
 
     def _align_simulation(self, audio_path: str, ground_truth_text: str) -> Tuple[List[str], List[Dict[str, float]]]:
         """

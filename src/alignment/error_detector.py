@@ -9,12 +9,27 @@ if __name__ == "__main__" and hasattr(sys.stdout, 'reconfigure'):
 # Import normalizer from sibling package
 try:
     from src.text_utils.normalizer import normalize_arabic
+    from src.text_utils.quran_g2p import quranic_g2p
 except ImportError:
-    # Handle direct local execution fallback
     import os
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
     from src.text_utils.normalizer import normalize_arabic
+    from src.text_utils.quran_g2p import quranic_g2p
+
+
+def check_phonetic_similarity(w1: str, w2: str, threshold: float = 0.60) -> bool:
+    """
+    Computes phonetic similarity ratio using our G2P engine.
+    Tolerates minor transcription errors from the ASR model.
+    """
+    p1 = quranic_g2p(w1)
+    p2 = quranic_g2p(w2)
+    
+    if not p1 or not p2:
+        return SequenceMatcher(None, normalize_arabic(w1), normalize_arabic(w2)).ratio() >= threshold
+        
+    return SequenceMatcher(None, p1, p2).ratio() >= threshold
 
 
 def detect_word_errors(
@@ -93,26 +108,67 @@ def detect_word_errors(
                 })
                 
         elif tag == 'replace':
-            # Word in ground truth was substituted with a wrong word (Substitution)
-            # We align expected words with null timestamps and log the substitution
-            for idx in range(i1, i2):
-                alignment.append({
-                    "word": gt_words_original[idx],
-                    "start": None,
-                    "end": None,
-                    "status": "substitution"
-                })
+            # Substituted text block. We match words index-by-index:
+            # - Pairs up to min(N, M) are logged as wrong_word (substitutions)
+            # - Remaining expected words are logged as missing_word (omissions)
+            # - Remaining spoken words are logged as extra_word (insertions)
+            N = i2 - i1
+            M = j2 - j1
+            max_len = max(N, M)
             
-            # Map the actual wrong words spoken
-            for idx in range(j1, j2):
-                t_info = spoken_timestamps[idx]
-                errors.append({
-                    "type": "wrong_word",
-                    "expected": " / ".join(gt_words_original[i1:i2]),
-                    "detected": spoken_words[idx],
-                    "timestamp_start": t_info["start"],
-                    "timestamp_end": t_info["end"]
-                })
+            for k in range(max_len):
+                if k < N and k < M:
+                    # Individual word substitution
+                    gt_word = gt_words_original[i1 + k]
+                    spoken_word = spoken_words[j1 + k]
+                    t_info = spoken_timestamps[j1 + k]
+                    
+                    # Run phonetic similarity check (tolerate ASR spelling mistakes if pronunciation is close)
+                    if check_phonetic_similarity(gt_word, spoken_word, threshold=0.60):
+                        alignment.append({
+                            "word": gt_word,
+                            "start": t_info["start"],
+                            "end": t_info["end"],
+                            "status": "correct"
+                        })
+                    else:
+                        alignment.append({
+                            "word": gt_word,
+                            "start": None,
+                            "end": None,
+                            "status": "substitution"
+                        })
+                        errors.append({
+                            "type": "wrong_word",
+                            "expected": gt_word,
+                            "detected": spoken_word,
+                            "timestamp_start": t_info["start"],
+                            "timestamp_end": t_info["end"]
+                        })
+                elif k < N:
+                    # Omission (expected word was skipped because spoken block is shorter)
+                    gt_word = gt_words_original[i1 + k]
+                    alignment.append({
+                        "word": gt_word,
+                        "start": None,
+                        "end": None,
+                        "status": "missing"
+                    })
+                    errors.append({
+                        "type": "missing_word",
+                        "word": gt_word,
+                        "expected_index": i1 + k
+                    })
+                else:
+                    # Insertion (extra word spoken because spoken block is longer)
+                    spoken_word = spoken_words[j1 + k]
+                    t_info = spoken_timestamps[j1 + k]
+                    errors.append({
+                        "type": "extra_word",
+                        "word": spoken_word,
+                        "timestamp_start": t_info["start"],
+                        "timestamp_end": t_info["end"]
+                    })
                 
     return {
         "text": ground_truth_text,
