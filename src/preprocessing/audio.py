@@ -58,12 +58,45 @@ def preprocess_audio(
     if len(y_trimmed) == 0:
         y_trimmed = y
 
-    # 4. Peak Normalization (adjust scale to max out at 1.0 or -1.0)
-    max_peak = np.max(np.abs(y_trimmed))
-    if max_peak > 0:
-        y_normalized = y_trimmed / max_peak
-    else:
-        y_normalized = y_trimmed
+    # Apply zero-phase Butterworth Bandpass filter (80Hz to 7500Hz) to eliminate mic hiss and AC hum
+    try:
+        from scipy.signal import butter, filtfilt
+        nyq = 0.5 * target_sr
+        low = 80.0 / nyq
+        high = 7500.0 / nyq
+        b, a = butter(4, [low, high], btype='band')
+        y_filtered = filtfilt(b, a, y_trimmed)
+    except Exception as e:
+        logger.warning(f"Failed to apply digital bandpass filter: {str(e)}. Using raw trimmed audio.")
+        y_filtered = y_trimmed
+
+    # Apply adaptive rolling RMS Noise Gate to silence background reverb without gating quiet speech
+    try:
+        window_size = 480  # 30ms window at 16kHz
+        padded = np.pad(y_filtered, window_size // 2, mode='reflect')
+        squared = padded ** 2
+        window = np.ones(window_size) / window_size
+        local_mean_squared = np.convolve(squared, window, mode='valid')
+        local_mean_squared = local_mean_squared[:len(y_filtered)]
+        local_rms = np.sqrt(np.maximum(local_mean_squared, 1e-9))
+        
+        max_rms = np.max(local_rms)
+        mean_rms = np.mean(local_rms)
+        
+        if max_rms > 0:
+            # Threshold scales with mean energy, clamped between 0.001 (floor) and 0.008 (ceiling)
+            adaptive_threshold = np.clip(0.015 * mean_rms, 0.001, 0.008)
+            y_gated = np.where(local_rms < adaptive_threshold, 0.0, y_filtered)
+            
+            max_peak = np.max(np.abs(y_gated))
+            y_normalized = y_gated / max_peak if max_peak > 0 else y_gated
+        else:
+            y_normalized = y_filtered
+    except Exception as e:
+        logger.warning(f"Failed to apply adaptive RMS noise gate: {str(e)}. Using bandpass filtered audio directly.")
+        # Fallback to standard peak normalization
+        max_peak = np.max(np.abs(y_filtered))
+        y_normalized = y_filtered / max_peak if max_peak > 0 else y_filtered
 
     # 5. Save as a standard WAV file
     sf.write(output_path, y_normalized, target_sr, format='WAV', subtype='PCM_16')

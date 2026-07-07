@@ -18,7 +18,7 @@ from src.preprocessing.audio import preprocess_audio
 
 def test_raw_transcription(
     audio_path: str, 
-    model_name: str = "rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final",
+    model_name: str = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic",
     output_path: str = "data/output/raw_transcript.txt"
 ):
     """

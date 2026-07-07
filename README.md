@@ -13,7 +13,7 @@ The core pipeline utilizes a **Hybrid DSP + Data-Driven Evaluation Strategy**:
 2.  **DSP Rules (Mathematics)**: Evaluate specific physical Tajweed rules (Madd elongation duration, Ghunnah nasal resonance, Qalqalah transients) on the sliced segments.
 
 For complete details, see:
-*   [system_architecture.md](file:///C:/Users/Lenovo/Desktop/projects/Tajweed%20AI/system_architecture.md) — System Design & Schema Specs.
+*   [system_architecture.md](system_architecture.md) — System Design & Schema Specs.
 
 ---
 
@@ -24,7 +24,7 @@ The project is structured into three progressive engineering phases:
 ### 🚀 [Phase 1: Word-Level MVP](phase1_architecture.md)
 *   **Goal**: Detect simple reading omissions, insertions, and substitutions.
 *   **Engine**: Resampling/noise preprocessing, WhisperX alignment, Arabic character normalizer, and Levenshtein Diff error mapping.
-*   *Details*: See [mvp_phase1_architecture.md](phase1_architecture.md)
+*   *Details*: See [phase1_architecture.md](phase1_architecture.md)
 
 ### 🚀 [Phase 2: Phoneme Alignment & Human-in-the-Loop UI](phase2_architecture.md)
 *   **Goal**: Enable letter-level alignments and build the teacher verification interface.

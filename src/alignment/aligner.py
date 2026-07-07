@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TajweedAligner")
 
 class TajweedAligner:
-    def __init__(self, use_ml: bool = False, model_name: str = "rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final"):
+    def __init__(self, use_ml: bool = False, model_name: str = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic", use_whisper: bool = False):
         """
         Initialize the Aligner.
         
@@ -16,11 +16,16 @@ class TajweedAligner:
             use_ml (bool): If True, attempts to load local ML models (Wav2Vec2/HuggingFace).
                            If False, operates in simulation mode for rapid testing.
             model_name (str): The HF model repository path for Arabic speech alignment.
+            use_whisper (bool): If True, uses Whisper for speech transcription instead of Wav2Vec2.
         """
         self.use_ml = use_ml
         self.model_name = model_name
+        self.use_whisper = use_whisper
         self.model = None
         self.processor = None
+        self.whisper_model_name = "tarteel-ai/whisper-base-ar-quran"
+        self.whisper_model = None
+        self.whisper_processor = None
 
         if self.use_ml:
             try:
@@ -98,11 +103,57 @@ class TajweedAligner:
         frame_duration = duration / frames
 
         # 3. Transcribe or use ground-truth directly
+        # Split-Path Architecture: 
+        # - Wav2Vec2 CTC logits are always used for forced-aligning the text to audio frames (Viterbi trellis).
+        # - The text to align can come from three sources:
+        #   1. Ground truth text (when force_align=True)
+        #   2. Whisper transcription (when use_whisper=True) -> Whisper acts as the STT engine, Wav2Vec2 acts as the aligner.
+        #   3. Wav2Vec2 transcription (when use_whisper=False) -> Wav2Vec2 acts as both STT and aligner.
         if force_align:
             transcription = ground_truth_text
         else:
-            predicted_ids = torch.argmax(logits, dim=-1)
-            transcription = self.processor.batch_decode(predicted_ids)[0]
+            if self.use_whisper:
+                # Load Whisper model on demand if not already loaded/disabled
+                if self.whisper_model is None:
+                    try:
+                        from transformers import WhisperForConditionalGeneration, WhisperProcessor
+                        logger.info(f"Loading Whisper model (trying local cache first): {self.whisper_model_name}...")
+                        try:
+                            self.whisper_processor = WhisperProcessor.from_pretrained(self.whisper_model_name, local_files_only=True)
+                            self.whisper_model = WhisperForConditionalGeneration.from_pretrained(self.whisper_model_name, local_files_only=True)
+                        except Exception:
+                            logger.info("Whisper model not found in local cache. Fetching from Hugging Face hub...")
+                            self.whisper_processor = WhisperProcessor.from_pretrained(self.whisper_model_name, local_files_only=False)
+                            self.whisper_model = WhisperForConditionalGeneration.from_pretrained(self.whisper_model_name, local_files_only=False)
+                    except Exception as e:
+                        logger.error(f"Failed to load Whisper model: {str(e)}. Falling back to Wav2Vec2 transcription.")
+                        self.whisper_model = False
+
+                if self.whisper_model:
+                    try:
+                        # Whisper expects 16kHz audio array directly as input
+                        input_features = self.whisper_processor(speech, sampling_rate=16000, return_tensors="pt").input_features
+                        with torch.no_grad():
+                            generated_ids = self.whisper_model.generate(input_features)
+                        transcription = self.whisper_processor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                        
+                        # Clean Whisper special tokens and non-Arabic metadata characters
+                        import re
+                        transcription = re.sub(r"<\|.*?\|>", "", transcription)
+                        transcription = re.sub(r"[a-zA-Z]", "", transcription)
+                        transcription = re.sub(r"\s+", " ", transcription).strip()
+                        
+                        logger.info(f"Whisper Hybrid Transcription: {transcription}")
+                    except Exception as e:
+                        logger.error(f"Whisper transcription failed: {str(e)}. Falling back to Wav2Vec2 transcription.")
+                        predicted_ids = torch.argmax(logits, dim=-1)
+                        transcription = self.processor.batch_decode(predicted_ids)[0]
+                else:
+                    predicted_ids = torch.argmax(logits, dim=-1)
+                    transcription = self.processor.batch_decode(predicted_ids)[0]
+            else:
+                predicted_ids = torch.argmax(logits, dim=-1)
+                transcription = self.processor.batch_decode(predicted_ids)[0]
         
         words_list = transcription.split()
         if not words_list:

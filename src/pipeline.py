@@ -38,7 +38,8 @@ def run_pipeline(
     reciter_id: str = "student_01",
     reciter_type: str = "student",
     use_ml: bool = False,
-    force_align: bool = False
+    force_align: bool = False,
+    use_whisper: bool = False
 ) -> Dict[str, Any]:
     """
     Executes the entire Phase 1 Word-Level MVP Pipeline:
@@ -61,7 +62,7 @@ def run_pipeline(
 
     # Step 2: Alignment (Transcribe + Word boundaries)
     logger.info("Executing Step 2: Speech-to-Text & Forced Alignment...")
-    aligner = TajweedAligner(use_ml=use_ml)
+    aligner = TajweedAligner(use_ml=use_ml, use_whisper=use_whisper)
     spoken_words, spoken_timestamps = aligner.align(clean_audio, ground_truth_text, force_align=force_align)
     logger.info(f"Aligned {len(spoken_words)} spoken words.")
 
@@ -104,6 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--reciter_type", type=str, choices=["student", "teacher"], default="student", help="Reciter role")
     parser.add_argument("--use_ml", action="store_true", help="Enable local ML models (Wav2Vec2)")
     parser.add_argument("--force_align", action="store_true", help="Bypass ASR spelling decoding and align directly to ground truth")
+    parser.add_argument("--use_whisper", action="store_true", help="Use Whisper-base-ar-quran for transcription instead of Wav2Vec2")
     
     args = parser.parse_args()
     
@@ -117,7 +119,8 @@ if __name__ == "__main__":
             reciter_id=args.reciter,
             reciter_type=args.reciter_type,
             use_ml=args.use_ml,
-            force_align=args.force_align
+            force_align=args.force_align,
+            use_whisper=args.use_whisper
         )
     except Exception as e:
         logger.error(f"Pipeline failed: {str(e)}", exc_info=True)

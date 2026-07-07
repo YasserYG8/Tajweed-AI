@@ -18,18 +18,42 @@ except ImportError:
     from src.text_utils.quran_g2p import quranic_g2p
 
 
-def check_phonetic_similarity(w1: str, w2: str, threshold: float = 0.60) -> bool:
+def get_dynamic_threshold(word: str) -> float:
     """
-    Computes phonetic similarity ratio using our G2P engine.
-    Tolerates minor transcription errors from the ASR model.
+    Computes a length-normalized similarity threshold.
+    Short words get a softer bar (floor at 0.5), long words get a stricter bar.
     """
+    base_word = normalize_arabic(word)
+    length = len(base_word)
+    if length <= 0:
+        return 0.60
+    return max(0.50, 1.0 - (2.0 / length))
+
+
+def check_phonetic_similarity(w1: str, w2: str, threshold: Optional[float] = None) -> bool:
+    """
+    Computes phonetic similarity ratio using our G2P engine, falling back to
+    normalized character sequence matching. Tolerates minor ASR spelling errors.
+    """
+    if threshold is None:
+        threshold = get_dynamic_threshold(w1)
+
+    # 1. Check normalized character similarity (highly robust to vowel noise)
+    norm1 = normalize_arabic(w1)
+    norm2 = normalize_arabic(w2)
+    char_ratio = SequenceMatcher(None, norm1, norm2).ratio()
+    if char_ratio >= threshold:
+        return True
+
+    # 2. Check G2P phoneme similarity
     p1 = quranic_g2p(w1)
     p2 = quranic_g2p(w2)
-    
-    if not p1 or not p2:
-        return SequenceMatcher(None, normalize_arabic(w1), normalize_arabic(w2)).ratio() >= threshold
-        
-    return SequenceMatcher(None, p1, p2).ratio() >= threshold
+    if p1 and p2:
+        phonetic_ratio = SequenceMatcher(None, p1, p2).ratio()
+        if phonetic_ratio >= threshold:
+            return True
+            
+    return False
 
 
 def detect_word_errors(
@@ -124,7 +148,7 @@ def detect_word_errors(
                     t_info = spoken_timestamps[j1 + k]
                     
                     # Run phonetic similarity check (tolerate ASR spelling mistakes if pronunciation is close)
-                    if check_phonetic_similarity(gt_word, spoken_word, threshold=0.60):
+                    if check_phonetic_similarity(gt_word, spoken_word, threshold=None):
                         alignment.append({
                             "word": gt_word,
                             "start": t_info["start"],

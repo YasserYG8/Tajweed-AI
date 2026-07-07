@@ -84,7 +84,8 @@ async def upload_audio_for_alignment(
     reciter_id: str = Form("student_01"),
     reciter_type: str = Form("student"),
     use_ml: bool = Form(False),
-    force_align: bool = Form(False)
+    force_align: bool = Form(False),
+    use_whisper: bool = Form(False)
 ):
     """
     Uploads an audio file, saves it to data/raw, executes the alignment pipeline,
@@ -109,7 +110,8 @@ async def upload_audio_for_alignment(
             reciter_id=reciter_id,
             reciter_type=reciter_type,
             use_ml=use_ml,
-            force_align=force_align
+            force_align=force_align,
+            use_whisper=use_whisper
         )
         
         # 3. Save to database
